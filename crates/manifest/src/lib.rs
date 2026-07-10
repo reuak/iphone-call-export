@@ -1,8 +1,12 @@
+mod crypto;
+
 use anyhow::{bail, Context, Result};
 use plist::Value;
 use std::{fs::File, io::Read, path::Path};
 
-const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+pub use crypto::verify_backup_password;
+
+pub(crate) const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestStatus {

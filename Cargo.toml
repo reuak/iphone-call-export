@@ -16,7 +16,9 @@ rust-version = "1.85"
 [workspace.dependencies]
 anyhow = "1"
 aes = "0.8"
+chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
+csv = "1"
 directories = "6"
 indicatif = "0.17"
 pbkdf2 = "0.12"

@@ -4,8 +4,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
     decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db, find_call_history_record,
-    inspect_manifest_db, keybag_tag_u32, manifest_file_count, parse_file_encryption_metadata,
-    read_encrypted_backup_metadata, unlock_backup,
+    inspect_call_history_schema, inspect_manifest_db, keybag_tag_u32, manifest_file_count,
+    parse_file_encryption_metadata, read_encrypted_backup_metadata, unlock_backup,
 };
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
@@ -61,6 +61,27 @@ fn hex_header(header: &[u8; 16]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn show_call_history_schema(path: &std::path::Path) -> Result<()> {
+    let schema = inspect_call_history_schema(path)?;
+    println!("✓ Entschlüsselte Anrufdatenbank als SQLite geöffnet");
+    println!("  Tabellen: {}", schema.tables.join(", "));
+    match schema.call_table {
+        Some(table) => {
+            println!("✓ Anruftabelle erkannt: {table}");
+            if let Some(count) = schema.call_count {
+                println!("  Anrufdatensätze: {count}");
+            }
+            println!("  Spalten: {}", schema.call_columns.join(", "));
+            println!("\nNächster Schritt: relevante Spalten zuordnen und Anrufe nach Zeitraum exportieren.");
+        }
+        None => {
+            println!("⚠ Keine eindeutige Anruftabelle erkannt");
+            println!("Bitte den Tabellenabschnitt posten; danach wird die Erkennung angepasst.");
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -209,7 +230,11 @@ fn main() -> Result<()> {
                         println!("  Kopf als Text: {}", printable_header(&payload.header));
                         println!("  Kopf als Hex: {}", hex_header(&payload.header));
                         println!("  Direktes SQLite: {}", if payload.is_sqlite { "ja" } else { "nein" });
-                        println!("Nächster Schritt: Format anhand dieses Dateikopfs erkennen und dekodieren.");
+                        if payload.is_sqlite {
+                            show_call_history_schema(payload_temp.path())?;
+                        } else {
+                            println!("Nächster Schritt: Format anhand dieses Dateikopfs erkennen und dekodieren.");
+                        }
                     } else {
                         let call_history_temp = NamedTempFile::new()?;
                         let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;
@@ -225,7 +250,7 @@ fn main() -> Result<()> {
                         println!(
                             "✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)"
                         );
-                        println!("✓ Entschlüsselte Anrufdatenbank besitzt einen gültigen SQLite-Kopf");
+                        show_call_history_schema(call_history_temp.path())?;
                     }
 
                     println!(

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
+use iphone_call_export_manifest::inspect_manifest_db;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -32,6 +33,23 @@ fn main() -> Result<()> {
             None => "unbekannt",
         }
     );
+
+    let manifest = inspect_manifest_db(&backup)?;
+    println!("\n✓ Manifest.db gefunden");
+    println!("  Größe: {} Bytes", manifest.size_bytes);
+    println!(
+        "  Format: {}",
+        if manifest.is_plain_sqlite {
+            "unverschlüsselte SQLite-Datenbank"
+        } else {
+            "verschlüsselt oder kein direkt lesbares SQLite-Format"
+        }
+    );
+
+    if info.encrypted == Some(true) && !manifest.is_plain_sqlite {
+        println!("\nNächster Schritt: Manifest.db lokal mit dem Backup-Passwort entsperren.");
+        println!("Das Passwort wird dabei weder gespeichert noch ausgegeben.");
+    }
 
     Ok(())
 }

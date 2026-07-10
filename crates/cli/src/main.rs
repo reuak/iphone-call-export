@@ -1,11 +1,12 @@
 use anyhow::{bail, Result};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
     inspect_manifest_db, keybag_tag_u32, read_encrypted_backup_metadata,
     verify_backup_password,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
@@ -23,6 +24,8 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Der Pfad wird aus dem Home-Verzeichnis des aktuell angemeldeten Benutzers
+    // ermittelt. Es ist kein Benutzername wie "admin" fest im Code hinterlegt.
     let root = args.backup_root.unwrap_or(default_backup_root()?);
 
     println!("Suche Backups in: {}", root.display());
@@ -77,14 +80,24 @@ fn main() -> Result<()> {
 
         if args.unlock {
             println!("\nDas Passwort wird lokal und unsichtbar eingegeben.");
-            println!("Die Ableitung mit DPIC kann einige Sekunden dauern.");
             let password = Zeroizing::new(rpassword::prompt_password("Backup-Passwort: ")?);
             if password.is_empty() {
                 bail!("Kein Passwort eingegeben");
             }
 
-            if verify_backup_password(&backup, &encrypted, password.as_bytes())? {
-                println!("\n✓ Passwort korrekt");
+            let progress = ProgressBar::new_spinner();
+            progress.set_style(
+                ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            progress.set_message("Backup-Schlüssel wird abgeleitet (10.000.000 + 10.000 Runden) …");
+            progress.enable_steady_tick(Duration::from_millis(90));
+
+            let unlocked = verify_backup_password(&backup, &encrypted, password.as_bytes());
+            progress.finish_and_clear();
+
+            if unlocked? {
+                println!("✓ Passwort korrekt");
                 println!("✓ Manifest-Schlüssel entsperrt");
                 println!("✓ Entschlüsselter Manifest.db-Kopf ist gültiges SQLite");
             } else {

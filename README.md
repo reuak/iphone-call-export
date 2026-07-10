@@ -42,7 +42,7 @@ cargo run -p iphone-call-export
 Alternativer Backup-Pfad:
 
 ```bash
-cargo run -p iphone-call-export -- --backup-root "/Users/admin/Library/Application Support/MobileSync/Backup"
+cargo run -p iphone-call-export -- --backup-root "/Users/%user%/Library/Application Support/MobileSync/Backup"
 ```
 
 ## Datenschutz

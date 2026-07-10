@@ -1,3 +1,4 @@
+mod call_history;
 mod crypto;
 mod database;
 mod payload;
@@ -7,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use plist::Value;
 use std::{fs::File, io::Read, path::Path};
 
+pub use call_history::{inspect_call_history_schema, CallHistorySchema};
 pub use crypto::{decrypt_manifest_db, unlock_manifest_key, verify_backup_password};
 pub use database::{
     find_call_history_record, manifest_file_count, parse_file_encryption_metadata,

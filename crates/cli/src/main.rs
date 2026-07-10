@@ -1,12 +1,14 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
-    decrypt_manifest_db, find_call_history_record, inspect_manifest_db, keybag_tag_u32,
-    manifest_file_count, read_encrypted_backup_metadata, unlock_manifest_key,
+    decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db, export_calls_csv,
+    find_call_history_record, inspect_call_history_schema, inspect_manifest_db, keybag_tag_u32,
+    manifest_file_count, parse_file_encryption_metadata, read_encrypted_backup_metadata,
+    unlock_backup,
 };
-use std::{path::PathBuf, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
@@ -18,16 +20,81 @@ struct Args {
     #[arg(long)]
     backup_root: Option<PathBuf>,
 
-    /// Backup-Passwort lokal abfragen, Manifest.db entschlüsseln und Anrufdaten suchen
+    /// Backup-Passwort lokal abfragen, Manifest.db und Anrufdaten entschlüsseln
     #[arg(long)]
     unlock: bool,
+
+    /// Entschlüsselte Anrufe als semikolongetrennte CSV-Datei exportieren
+    #[arg(long, value_name = "DATEI")]
+    csv: Option<PathBuf>,
+}
+
+fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
+    let progress = ProgressBar::new_spinner();
+    progress.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    progress.set_message(message.into());
+    progress.enable_steady_tick(Duration::from_millis(90));
+    Ok(progress)
+}
+
+fn show_optional_number(label: &str, value: Option<u64>) {
+    match value {
+        Some(value) => println!("  {label}: {value}"),
+        None => println!("  {label}: nicht gesetzt"),
+    }
+}
+
+fn printable_header(header: &[u8; 16]) -> String {
+    header
+        .iter()
+        .map(|byte| if byte.is_ascii_graphic() || *byte == b' ' { *byte as char } else { '.' })
+        .collect()
+}
+
+fn hex_header(header: &[u8; 16]) -> String {
+    header
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn inspect_and_export_calls(database_path: &Path, csv_path: Option<&Path>) -> Result<()> {
+    let schema = inspect_call_history_schema(database_path)?;
+    println!("✓ Entschlüsselte Anrufdatenbank als SQLite geöffnet");
+    println!("  Tabellen: {}", schema.tables.join(", "));
+
+    match schema.call_table {
+        Some(table) => {
+            println!("✓ Anruftabelle erkannt: {table}");
+            if let Some(count) = schema.call_count {
+                println!("  Anrufdatensätze: {count}");
+            }
+            println!("  Spalten: {}", schema.call_columns.join(", "));
+
+            if let Some(output_path) = csv_path {
+                let exported = export_calls_csv(database_path, output_path)?;
+                println!("✓ {exported} Anrufe als CSV exportiert");
+                println!("  Ausgabe: {}", output_path.display());
+                println!("  Felder: Datum, Dauer, Richtung, angenommen, Rufnummer, Name, Anruftyp, Land, Dienstanbieter, ID");
+            } else {
+                println!("\nCSV-Export aktivieren mit:");
+                println!("  cargo run -p iphone-call-export -- --unlock --csv iphone-anrufe.csv");
+            }
+        }
+        None => {
+            println!("⚠ Keine eindeutige Anruftabelle erkannt");
+        }
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    // Der Pfad wird aus dem Home-Verzeichnis des aktuell angemeldeten Benutzers
-    // ermittelt. Es ist kein Benutzername wie "admin" fest im Code hinterlegt.
-    let root = args.backup_root.unwrap_or(default_backup_root()?);
+    let root = args.backup_root.clone().unwrap_or(default_backup_root()?);
 
     println!("Suche Backups in: {}", root.display());
     let backup = newest_backup(&root)?;
@@ -61,17 +128,11 @@ fn main() -> Result<()> {
     if info.encrypted == Some(true) && !manifest.is_plain_sqlite {
         let encrypted = read_encrypted_backup_metadata(&backup)?;
         println!("\n✓ Verschlüsselungsmetadaten gelesen");
-        println!(
-            "  Backupformat: {}",
-            encrypted.version.as_deref().unwrap_or("unbekannt")
-        );
+        println!("  Backupformat: {}", encrypted.version.as_deref().unwrap_or("unbekannt"));
         println!("  Keybag-Größe: {} Bytes", encrypted.backup_keybag.len());
         println!("  Keybag-Einträge: {}", encrypted.keybag_entries.len());
         println!("  Manifest-Schlüsselklasse: {}", encrypted.manifest_key_class);
-        println!(
-            "  Eingewickelter Manifest-Schlüssel: {} Bytes",
-            encrypted.wrapped_manifest_key.len()
-        );
+        println!("  Eingewickelter Manifest-Schlüssel: {} Bytes", encrypted.wrapped_manifest_key.len());
         if let Some(iter) = keybag_tag_u32(&encrypted.keybag_entries, "ITER") {
             println!("  PBKDF2-ITER: {iter}");
         }
@@ -86,60 +147,106 @@ fn main() -> Result<()> {
                 bail!("Kein Passwort eingegeben");
             }
 
-            let progress = ProgressBar::new_spinner();
-            progress.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            progress.set_message("Backup-Schlüssel wird abgeleitet (10.000.000 + 10.000 Runden) …");
-            progress.enable_steady_tick(Duration::from_millis(90));
-
-            let manifest_key = unlock_manifest_key(&encrypted, password.as_bytes());
+            let progress = spinner("Backup-Schlüssel wird einmalig abgeleitet (10.000.000 + 10.000 Runden) …")?;
+            let unlocked = unlock_backup(&encrypted, password.as_bytes());
             progress.finish_and_clear();
-            let Some(manifest_key) = manifest_key? else {
+            let Some(unlocked) = unlocked? else {
                 bail!("Passwort falsch oder Backup-Schlüssel konnten nicht entsperrt werden");
             };
 
             println!("✓ Passwort korrekt");
-            println!("✓ Manifest-Schlüssel entsperrt");
+            println!("✓ Manifest- und Klassenschlüssel entsperrt");
 
-            let temp = NamedTempFile::new()?;
-            let decrypt_progress = ProgressBar::new_spinner();
-            decrypt_progress.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            decrypt_progress.set_message("Manifest.db wird vollständig entschlüsselt …");
-            decrypt_progress.enable_steady_tick(Duration::from_millis(90));
+            let manifest_temp = NamedTempFile::new()?;
+            let decrypt_progress = spinner("Manifest.db wird vollständig entschlüsselt …")?;
             let decrypted_size = decrypt_manifest_db(
                 &backup.join("Manifest.db"),
-                temp.path(),
-                &manifest_key,
+                manifest_temp.path(),
+                unlocked.manifest_key(),
             );
             decrypt_progress.finish_and_clear();
             let decrypted_size = decrypted_size?;
 
             println!("✓ Manifest.db vollständig entschlüsselt ({decrypted_size} Bytes)");
-            let count = manifest_file_count(temp.path())?;
+            let count = manifest_file_count(manifest_temp.path())?;
             println!("✓ SQLite geöffnet: {count} Dateieinträge");
 
-            match find_call_history_record(temp.path())? {
+            match find_call_history_record(manifest_temp.path())? {
                 Some(record) => {
                     println!("✓ CallHistory.storedata gefunden");
                     println!("  Domain: {}", record.domain);
                     println!("  Relativer Pfad: {}", record.relative_path);
                     println!("  Backup-Datei-ID: {}", record.file_id);
-                    println!("  Physischer Pfad: {}", backup.join(&record.file_id[..2]).join(&record.file_id).display());
-                }
-                None => {
-                    println!("⚠ CallHistory.storedata wurde in Manifest.db nicht gefunden");
-                }
-            }
+                    let physical_path = backup.join(&record.file_id[..2]).join(&record.file_id);
+                    println!("  Physischer Pfad: {}", physical_path.display());
+                    println!("  Physische Dateigröße: {} Bytes", physical_path.metadata()?.len());
+                    println!("  Metadaten-BLOB: {} Bytes", record.metadata_blob.len());
 
-            println!("\nDie entschlüsselte Manifest.db wurde nur temporär angelegt und wird jetzt gelöscht.");
+                    let file_crypto = parse_file_encryption_metadata(&record.metadata_blob)?;
+                    println!("✓ Datei- und Kompressionsmetadaten gelesen");
+                    println!("  Schutzklasse: {}", file_crypto.protection_class);
+                    println!("  Eingewickelter Dateischlüssel: {} Bytes", file_crypto.wrapped_key.len());
+                    match file_crypto.logical_size {
+                        Some(size) => println!("  Logische Dateigröße: {size} Bytes"),
+                        None => println!("  Logische Dateigröße: nicht gesetzt"),
+                    }
+                    match file_crypto.size_before_copy {
+                        Some(size) => println!("  SizeBeforeCopy: {size} Bytes"),
+                        None => println!("  SizeBeforeCopy: nicht gesetzt"),
+                    }
+                    show_optional_number("ContentCompressionMethod", file_crypto.content_compression_method);
+                    show_optional_number("ContentEncodingMethod", file_crypto.content_encoding_method);
+
+                    let file_key = unlocked.unlock_file_key(&file_crypto)?;
+                    println!("✓ Dateischlüssel entsperrt");
+
+                    let physical_size = physical_path.metadata()?.len();
+                    let logical_size = file_crypto
+                        .logical_size
+                        .context("Logische Dateigröße fehlt; sichere Entschlüsselung ist nicht möglich")?;
+
+                    if logical_size > physical_size
+                        || file_crypto.content_compression_method.unwrap_or(0) != 0
+                        || file_crypto.content_encoding_method.unwrap_or(0) != 0
+                    {
+                        let payload_temp = NamedTempFile::new()?;
+                        let payload_progress = spinner("Gespeicherter CallHistory-Inhalt wird vollständig entschlüsselt …")?;
+                        let payload = decrypt_backup_payload(&physical_path, payload_temp.path(), &file_key);
+                        payload_progress.finish_and_clear();
+                        let payload = payload?;
+
+                        println!("\n✓ Gespeicherter Inhalt entschlüsselt ({} Bytes)", payload.size_bytes);
+                        println!("  Kopf als Text: {}", printable_header(&payload.header));
+                        println!("  Kopf als Hex: {}", hex_header(&payload.header));
+                        println!("  Direktes SQLite: {}", if payload.is_sqlite { "ja" } else { "nein" });
+                        if payload.is_sqlite {
+                            inspect_and_export_calls(payload_temp.path(), args.csv.as_deref())?;
+                        } else {
+                            println!("Unbekanntes Inhaltsformat; Export wurde nicht ausgeführt.");
+                        }
+                    } else {
+                        let call_history_temp = NamedTempFile::new()?;
+                        let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;
+                        let call_history_size = decrypt_backup_file(
+                            &physical_path,
+                            call_history_temp.path(),
+                            &file_key,
+                            logical_size,
+                        );
+                        file_progress.finish_and_clear();
+                        let call_history_size = call_history_size?;
+
+                        println!("✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)");
+                        inspect_and_export_calls(call_history_temp.path(), args.csv.as_deref())?;
+                    }
+
+                    println!("\nDie entschlüsselten Datenbanken wurden nur temporär angelegt und werden jetzt gelöscht.");
+                }
+                None => println!("⚠ CallHistory.storedata wurde in Manifest.db nicht gefunden"),
+            }
         } else {
             println!("\nNächster Test:");
-            println!("  cargo run -p iphone-call-export -- --unlock");
+            println!("  cargo run -p iphone-call-export -- --unlock --csv iphone-anrufe.csv");
             println!("Das Passwort wird weder gespeichert noch ausgegeben.");
         }
     }

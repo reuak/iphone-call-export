@@ -7,7 +7,11 @@ use anyhow::{bail, Context, Result};
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
 use sha2::Sha256;
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Write},
+    path::Path,
+};
 use zeroize::Zeroizing;
 
 const WRAP_PASSCODE: u32 = 2;
@@ -20,11 +24,12 @@ struct ClassKeyRecord {
     wrapped_key: Vec<u8>,
 }
 
-pub fn verify_backup_password(
-    backup_dir: &Path,
+/// Unlocks and returns the 32-byte Manifest.db key.
+/// The caller must keep this value local and short-lived.
+pub fn unlock_manifest_key(
     metadata: &EncryptedBackupMetadata,
     password: &[u8],
-) -> Result<bool> {
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
     let passcode_key = derive_passcode_key(&metadata.keybag_entries, password)?;
     let class_keys = parse_class_keys(&metadata.keybag_entries)?;
     let class_record = class_keys
@@ -47,7 +52,7 @@ pub fn verify_backup_password(
 
     let class_key = match aes_key_unwrap(&passcode_key, &class_record.wrapped_key) {
         Ok(key) => Zeroizing::new(key),
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(None),
     };
     if class_key.len() != 32 {
         bail!("Entsperrter Klassenschlüssel hat {} statt 32 Bytes", class_key.len());
@@ -55,13 +60,106 @@ pub fn verify_backup_password(
 
     let manifest_key = match aes_key_unwrap(&class_key, &metadata.wrapped_manifest_key) {
         Ok(key) => Zeroizing::new(key),
-        Err(_) => return Ok(false),
+        Err(_) => return Ok(None),
     };
     if manifest_key.len() != 32 {
         bail!("Entsperrter Manifest-Schlüssel hat {} statt 32 Bytes", manifest_key.len());
     }
 
+    Ok(Some(manifest_key))
+}
+
+pub fn verify_backup_password(
+    backup_dir: &Path,
+    metadata: &EncryptedBackupMetadata,
+    password: &[u8],
+) -> Result<bool> {
+    let Some(manifest_key) = unlock_manifest_key(metadata, password)? else {
+        return Ok(false);
+    };
     decrypt_manifest_header(backup_dir, &manifest_key)
+}
+
+/// Decrypts the complete Manifest.db using AES-256-CBC with a zero IV.
+/// Apple backup manifests are block-aligned; valid PKCS#7 padding is removed.
+pub fn decrypt_manifest_db(
+    encrypted_path: &Path,
+    output_path: &Path,
+    manifest_key: &[u8],
+) -> Result<u64> {
+    if manifest_key.len() != 32 {
+        bail!("Manifest-Schlüssel muss 32 Bytes lang sein");
+    }
+
+    let input = File::open(encrypted_path)
+        .with_context(|| format!("Verschlüsselte Manifest.db kann nicht geöffnet werden: {}", encrypted_path.display()))?;
+    let size = input.metadata()?.len();
+    if size == 0 || size % 16 != 0 {
+        bail!("Manifest.db hat keine gültige AES-Blocklänge: {size} Bytes");
+    }
+
+    let cipher = Aes256::new_from_slice(manifest_key)
+        .context("Manifest-AES-256 konnte nicht initialisiert werden")?;
+    let mut reader = BufReader::new(input);
+    let output = File::create(output_path)
+        .with_context(|| format!("Temporäre Manifest.db kann nicht erstellt werden: {}", output_path.display()))?;
+    let mut writer = BufWriter::new(output);
+
+    let mut previous_ciphertext = [0_u8; 16]; // CBC IV = 0
+    let mut ciphertext = [0_u8; 16];
+    let mut pending_plaintext: Option<[u8; 16]> = None;
+    let mut written = 0_u64;
+
+    loop {
+        match reader.read_exact(&mut ciphertext) {
+            Ok(()) => {
+                let current_ciphertext = ciphertext;
+                let mut block = GenericArray::clone_from_slice(&ciphertext);
+                cipher.decrypt_block(&mut block);
+
+                let mut plaintext = [0_u8; 16];
+                for index in 0..16 {
+                    plaintext[index] = block[index] ^ previous_ciphertext[index];
+                }
+                previous_ciphertext = current_ciphertext;
+
+                if let Some(previous_plaintext) = pending_plaintext.replace(plaintext) {
+                    writer.write_all(&previous_plaintext)?;
+                    written += 16;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error).context("Manifest.db konnte nicht vollständig gelesen werden"),
+        }
+    }
+
+    let mut last = pending_plaintext.context("Manifest.db enthält keinen vollständigen Block")?;
+    let keep = unpadded_len(&last);
+    writer.write_all(&last[..keep])?;
+    written += keep as u64;
+    last.fill(0);
+    writer.flush()?;
+
+    let mut check = File::open(output_path)?;
+    let mut header = [0_u8; 16];
+    check.read_exact(&mut header)?;
+    if &header != SQLITE_HEADER {
+        bail!("Entschlüsselte Manifest.db besitzt keinen gültigen SQLite-Kopf");
+    }
+
+    Ok(written)
+}
+
+fn unpadded_len(block: &[u8; 16]) -> usize {
+    let padding = block[15] as usize;
+    if padding == 0 || padding > 16 {
+        return 16;
+    }
+    if block[16 - padding..].iter().all(|byte| *byte as usize == padding) {
+        16 - padding
+    } else {
+        16
+    }
 }
 
 fn derive_passcode_key(entries: &[KeybagEntry], password: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -113,7 +211,7 @@ fn parse_class_keys(entries: &[KeybagEntry]) -> Result<Vec<ClassKeyRecord>> {
     Ok(records)
 }
 
-fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>> {
     if kek.len() != 32 {
         bail!("AES-Key-Encryption-Key muss 32 Bytes lang sein");
     }
@@ -214,5 +312,14 @@ mod tests {
         assert_eq!(records[0].class, 3);
         assert_eq!(records[0].wrap, 2);
         assert_eq!(records[0].wrapped_key.len(), 40);
+    }
+
+    #[test]
+    fn removes_valid_pkcs7_padding_only() {
+        let mut padded = [0_u8; 16];
+        padded[12..].fill(4);
+        assert_eq!(unpadded_len(&padded), 12);
+        padded[14] = 3;
+        assert_eq!(unpadded_len(&padded), 16);
     }
 }

@@ -1,5 +1,6 @@
 mod crypto;
 mod database;
+mod payload;
 mod unlock;
 
 use anyhow::{bail, Context, Result};
@@ -11,6 +12,7 @@ pub use database::{
     find_call_history_record, manifest_file_count, parse_file_encryption_metadata,
     FileEncryptionMetadata, ManifestFileRecord,
 };
+pub use payload::{decrypt_backup_payload, DecryptedPayloadInfo};
 pub use unlock::{decrypt_backup_file, unlock_backup, UnlockedBackup};
 
 pub(crate) const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";

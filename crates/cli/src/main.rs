@@ -1,10 +1,12 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
     inspect_manifest_db, keybag_tag_u32, read_encrypted_backup_metadata,
+    verify_backup_password,
 };
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
 #[command(name = "iphone-call-export")]
@@ -13,6 +15,10 @@ struct Args {
     /// Optionaler Pfad zum MobileSync/Backup-Ordner
     #[arg(long)]
     backup_root: Option<PathBuf>,
+
+    /// Backup-Passwort lokal abfragen und Manifest.db testweise entsperren
+    #[arg(long)]
+    unlock: bool,
 }
 
 fn main() -> Result<()> {
@@ -49,29 +55,46 @@ fn main() -> Result<()> {
     );
 
     if info.encrypted == Some(true) && !manifest.is_plain_sqlite {
-        let metadata = read_encrypted_backup_metadata(&backup)?;
+        let encrypted = read_encrypted_backup_metadata(&backup)?;
         println!("\n✓ Verschlüsselungsmetadaten gelesen");
         println!(
             "  Backupformat: {}",
-            metadata.version.as_deref().unwrap_or("unbekannt")
+            encrypted.version.as_deref().unwrap_or("unbekannt")
         );
-        println!("  Keybag-Größe: {} Bytes", metadata.backup_keybag.len());
-        println!("  Keybag-Einträge: {}", metadata.keybag_entries.len());
-        println!("  Manifest-Schlüsselklasse: {}", metadata.manifest_key_class);
+        println!("  Keybag-Größe: {} Bytes", encrypted.backup_keybag.len());
+        println!("  Keybag-Einträge: {}", encrypted.keybag_entries.len());
+        println!("  Manifest-Schlüsselklasse: {}", encrypted.manifest_key_class);
         println!(
             "  Eingewickelter Manifest-Schlüssel: {} Bytes",
-            metadata.wrapped_manifest_key.len()
+            encrypted.wrapped_manifest_key.len()
         );
-
-        if let Some(iterations) = keybag_tag_u32(&metadata.keybag_entries, "ITER") {
-            println!("  PBKDF2-ITER: {iterations}");
+        if let Some(iter) = keybag_tag_u32(&encrypted.keybag_entries, "ITER") {
+            println!("  PBKDF2-ITER: {iter}");
         }
-        if let Some(iterations) = keybag_tag_u32(&metadata.keybag_entries, "DPIC") {
-            println!("  PBKDF2-DPIC: {iterations}");
+        if let Some(dpic) = keybag_tag_u32(&encrypted.keybag_entries, "DPIC") {
+            println!("  PBKDF2-DPIC: {dpic}");
         }
 
-        println!("\nNächster Schritt: Passwortableitung und Keybag-Entsperrung implementieren.");
-        println!("Es wurden keine Schlüssel oder Passwörter ausgegeben.");
+        if args.unlock {
+            println!("\nDas Passwort wird lokal und unsichtbar eingegeben.");
+            println!("Die Ableitung mit DPIC kann einige Sekunden dauern.");
+            let password = Zeroizing::new(rpassword::prompt_password("Backup-Passwort: ")?);
+            if password.is_empty() {
+                bail!("Kein Passwort eingegeben");
+            }
+
+            if verify_backup_password(&backup, &encrypted, password.as_bytes())? {
+                println!("\n✓ Passwort korrekt");
+                println!("✓ Manifest-Schlüssel entsperrt");
+                println!("✓ Entschlüsselter Manifest.db-Kopf ist gültiges SQLite");
+            } else {
+                bail!("Passwort falsch oder Backup-Schlüssel konnten nicht entsperrt werden");
+            }
+        } else {
+            println!("\nNächster Test:");
+            println!("  cargo run -p iphone-call-export -- --unlock");
+            println!("Das Passwort wird weder gespeichert noch ausgegeben.");
+        }
     }
 
     Ok(())

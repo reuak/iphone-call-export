@@ -1,11 +1,11 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
-    decrypt_manifest_db, find_call_history_record, inspect_manifest_db, keybag_tag_u32,
-    manifest_file_count, parse_file_encryption_metadata, read_encrypted_backup_metadata,
-    unlock_manifest_key,
+    decrypt_backup_file, decrypt_manifest_db, find_call_history_record, inspect_manifest_db,
+    keybag_tag_u32, manifest_file_count, parse_file_encryption_metadata,
+    read_encrypted_backup_metadata, unlock_backup,
 };
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
@@ -19,7 +19,7 @@ struct Args {
     #[arg(long)]
     backup_root: Option<PathBuf>,
 
-    /// Backup-Passwort lokal abfragen, Manifest.db entschlüsseln und Anrufdaten suchen
+    /// Backup-Passwort lokal abfragen, Manifest.db und Anrufdaten entschlüsseln
     #[arg(long)]
     unlock: bool,
 }
@@ -96,55 +96,78 @@ fn main() -> Result<()> {
                 bail!("Kein Passwort eingegeben");
             }
 
-            let progress = spinner("Backup-Schlüssel wird abgeleitet (10.000.000 + 10.000 Runden) …")?;
-            let manifest_key = unlock_manifest_key(&encrypted, password.as_bytes());
+            let progress = spinner("Backup-Schlüssel wird einmalig abgeleitet (10.000.000 + 10.000 Runden) …")?;
+            let unlocked = unlock_backup(&encrypted, password.as_bytes());
             progress.finish_and_clear();
-            let Some(manifest_key) = manifest_key? else {
+            let Some(unlocked) = unlocked? else {
                 bail!("Passwort falsch oder Backup-Schlüssel konnten nicht entsperrt werden");
             };
 
             println!("✓ Passwort korrekt");
-            println!("✓ Manifest-Schlüssel entsperrt");
+            println!("✓ Manifest- und Klassenschlüssel entsperrt");
 
-            let temp = NamedTempFile::new()?;
+            let manifest_temp = NamedTempFile::new()?;
             let decrypt_progress = spinner("Manifest.db wird vollständig entschlüsselt …")?;
             let decrypted_size = decrypt_manifest_db(
                 &backup.join("Manifest.db"),
-                temp.path(),
-                &manifest_key,
+                manifest_temp.path(),
+                unlocked.manifest_key(),
             );
             decrypt_progress.finish_and_clear();
             let decrypted_size = decrypted_size?;
 
             println!("✓ Manifest.db vollständig entschlüsselt ({decrypted_size} Bytes)");
-            let count = manifest_file_count(temp.path())?;
+            let count = manifest_file_count(manifest_temp.path())?;
             println!("✓ SQLite geöffnet: {count} Dateieinträge");
 
-            match find_call_history_record(temp.path())? {
+            match find_call_history_record(manifest_temp.path())? {
                 Some(record) => {
                     println!("✓ CallHistory.storedata gefunden");
                     println!("  Domain: {}", record.domain);
                     println!("  Relativer Pfad: {}", record.relative_path);
                     println!("  Backup-Datei-ID: {}", record.file_id);
-                    println!("  Physischer Pfad: {}", backup.join(&record.file_id[..2]).join(&record.file_id).display());
+                    let physical_path = backup.join(&record.file_id[..2]).join(&record.file_id);
+                    println!("  Physischer Pfad: {}", physical_path.display());
                     println!("  Metadaten-BLOB: {} Bytes", record.metadata_blob.len());
 
                     let file_crypto = parse_file_encryption_metadata(&record.metadata_blob)?;
                     println!("✓ Dateiverschlüsselungsmetadaten gelesen");
                     println!("  Schutzklasse: {}", file_crypto.protection_class);
-                    println!("  Eingewickelter Dateischlüssel: {} Bytes", file_crypto.wrapped_key.len());
-                    match file_crypto.logical_size {
-                        Some(size) => println!("  Logische Dateigröße: {size} Bytes"),
-                        None => println!("  Logische Dateigröße: unbekannt"),
-                    }
-                    println!("\nNächster Schritt: Dateischlüssel entsperren und CallHistory.storedata entschlüsseln.");
+                    println!(
+                        "  Eingewickelter Dateischlüssel: {} Bytes",
+                        file_crypto.wrapped_key.len()
+                    );
+                    let logical_size = file_crypto
+                        .logical_size
+                        .context("Logische Dateigröße fehlt; sichere Entschlüsselung ist nicht möglich")?;
+                    println!("  Logische Dateigröße: {logical_size} Bytes");
+
+                    let file_key = unlocked.unlock_file_key(&file_crypto)?;
+                    println!("✓ Dateischlüssel entsperrt");
+
+                    let call_history_temp = NamedTempFile::new()?;
+                    let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;
+                    let call_history_size = decrypt_backup_file(
+                        &physical_path,
+                        call_history_temp.path(),
+                        &file_key,
+                        logical_size,
+                    );
+                    file_progress.finish_and_clear();
+                    let call_history_size = call_history_size?;
+
+                    println!(
+                        "✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)"
+                    );
+                    println!("✓ Entschlüsselte Anrufdatenbank besitzt einen gültigen SQLite-Kopf");
+                    println!(
+                        "\nDie entschlüsselten Datenbanken wurden nur temporär angelegt und werden jetzt gelöscht."
+                    );
                 }
                 None => {
                     println!("⚠ CallHistory.storedata wurde in Manifest.db nicht gefunden");
                 }
             }
-
-            println!("\nDie entschlüsselte Manifest.db wurde nur temporär angelegt und wird jetzt gelöscht.");
         } else {
             println!("\nNächster Test:");
             println!("  cargo run -p iphone-call-export -- --unlock");

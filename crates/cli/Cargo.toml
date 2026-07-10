@@ -10,3 +10,5 @@ anyhow.workspace = true
 clap.workspace = true
 iphone-call-export-backup = { path = "../backup" }
 iphone-call-export-manifest = { path = "../manifest" }
+rpassword.workspace = true
+zeroize.workspace = true

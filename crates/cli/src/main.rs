@@ -3,8 +3,8 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
-    decrypt_backup_file, decrypt_manifest_db, find_call_history_record, inspect_manifest_db,
-    keybag_tag_u32, manifest_file_count, parse_file_encryption_metadata,
+    decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db, find_call_history_record,
+    inspect_manifest_db, keybag_tag_u32, manifest_file_count, parse_file_encryption_metadata,
     read_encrypted_backup_metadata, unlock_backup,
 };
 use std::{path::PathBuf, time::Duration};
@@ -40,6 +40,27 @@ fn show_optional_number(label: &str, value: Option<u64>) {
         Some(value) => println!("  {label}: {value}"),
         None => println!("  {label}: nicht gesetzt"),
     }
+}
+
+fn printable_header(header: &[u8; 16]) -> String {
+    header
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+fn hex_header(header: &[u8; 16]) -> String {
+    header
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn main() -> Result<()> {
@@ -174,8 +195,21 @@ fn main() -> Result<()> {
                         || file_crypto.content_compression_method.unwrap_or(0) != 0
                         || file_crypto.content_encoding_method.unwrap_or(0) != 0
                     {
-                        println!("\n✓ Komprimierte oder codierte Backup-Datei erkannt");
-                        println!("Nächster Schritt: gespeicherten Inhalt entschlüsseln und anschließend gemäß den oben angezeigten Methoden dekodieren.");
+                        let payload_temp = NamedTempFile::new()?;
+                        let payload_progress = spinner("Gespeicherter CallHistory-Inhalt wird vollständig entschlüsselt …")?;
+                        let payload = decrypt_backup_payload(
+                            &physical_path,
+                            payload_temp.path(),
+                            &file_key,
+                        );
+                        payload_progress.finish_and_clear();
+                        let payload = payload?;
+
+                        println!("\n✓ Gespeicherter Inhalt entschlüsselt ({} Bytes)", payload.size_bytes);
+                        println!("  Kopf als Text: {}", printable_header(&payload.header));
+                        println!("  Kopf als Hex: {}", hex_header(&payload.header));
+                        println!("  Direktes SQLite: {}", if payload.is_sqlite { "ja" } else { "nein" });
+                        println!("Nächster Schritt: Format anhand dieses Dateikopfs erkennen und dekodieren.");
                     } else {
                         let call_history_temp = NamedTempFile::new()?;
                         let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;

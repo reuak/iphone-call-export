@@ -4,9 +4,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
     decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db, export_calls_csv,
-    find_call_history_record, inspect_call_history_schema, inspect_manifest_db, keybag_tag_u32,
-    manifest_file_count, parse_file_encryption_metadata, read_encrypted_backup_metadata,
-    unlock_backup,
+    find_call_history_record, find_contact_candidates, inspect_call_history_schema,
+    inspect_manifest_db, keybag_tag_u32, manifest_file_count, parse_file_encryption_metadata,
+    read_encrypted_backup_metadata, unlock_backup,
 };
 use std::{path::{Path, PathBuf}, time::Duration};
 use tempfile::NamedTempFile;
@@ -27,6 +27,10 @@ struct Args {
     /// Entschlüsselte Anrufe als semikolongetrennte CSV-Datei exportieren
     #[arg(long, value_name = "DATEI")]
     csv: Option<PathBuf>,
+
+    /// Manifest.db nach AddressBook-, Contacts- und VCF-Dateien durchsuchen
+    #[arg(long)]
+    find_contacts: bool,
 }
 
 fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
@@ -88,6 +92,29 @@ fn inspect_and_export_calls(database_path: &Path, csv_path: Option<&Path>) -> Re
         None => {
             println!("⚠ Keine eindeutige Anruftabelle erkannt");
         }
+    }
+    Ok(())
+}
+
+fn show_contact_candidates(manifest_path: &Path, backup_path: &Path) -> Result<()> {
+    let candidates = find_contact_candidates(manifest_path)?;
+    println!("\n✓ Kontaktsuche in Manifest.db abgeschlossen");
+    if candidates.is_empty() {
+        println!("  Keine AddressBook-, Contacts- oder VCF-Kandidaten gefunden");
+        return Ok(());
+    }
+
+    println!("  {} Kandidaten gefunden:", candidates.len());
+    for record in candidates {
+        let physical_path = if record.file_id.len() >= 2 {
+            backup_path.join(&record.file_id[..2]).join(&record.file_id)
+        } else {
+            backup_path.join(&record.file_id)
+        };
+        println!("  - [{}] {}", record.domain, record.relative_path);
+        println!("    Datei-ID: {}", record.file_id);
+        println!("    Flags: {}", record.flags);
+        println!("    Physischer Pfad: {}", physical_path.display());
     }
     Ok(())
 }
@@ -171,6 +198,10 @@ fn main() -> Result<()> {
             let count = manifest_file_count(manifest_temp.path())?;
             println!("✓ SQLite geöffnet: {count} Dateieinträge");
 
+            if args.find_contacts {
+                show_contact_candidates(manifest_temp.path(), &backup)?;
+            }
+
             match find_call_history_record(manifest_temp.path())? {
                 Some(record) => {
                     println!("✓ CallHistory.storedata gefunden");
@@ -246,7 +277,7 @@ fn main() -> Result<()> {
             }
         } else {
             println!("\nNächster Test:");
-            println!("  cargo run -p iphone-call-export -- --unlock --csv iphone-anrufe.csv");
+            println!("  cargo run -p iphone-call-export -- --unlock --find-contacts");
             println!("Das Passwort wird weder gespeichert noch ausgegeben.");
         }
     }

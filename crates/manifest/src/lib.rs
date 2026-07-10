@@ -11,8 +11,9 @@ use std::{fs::File, io::Read, path::Path};
 pub use call_history::{export_calls_csv, inspect_call_history_schema, CallHistorySchema};
 pub use crypto::{decrypt_manifest_db, unlock_manifest_key, verify_backup_password};
 pub use database::{
-    find_call_history_record, manifest_file_count, parse_file_encryption_metadata,
-    FileEncryptionMetadata, ManifestFileRecord,
+    find_call_history_record, find_contact_candidates, manifest_file_count,
+    parse_file_encryption_metadata, FileEncryptionMetadata, ManifestFileRecord,
+    ManifestPathRecord,
 };
 pub use payload::{decrypt_backup_payload, DecryptedPayloadInfo};
 pub use unlock::{decrypt_backup_file, unlock_backup, UnlockedBackup};

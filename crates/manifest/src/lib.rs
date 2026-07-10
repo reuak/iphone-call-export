@@ -1,10 +1,12 @@
 mod crypto;
+mod database;
 
 use anyhow::{bail, Context, Result};
 use plist::Value;
 use std::{fs::File, io::Read, path::Path};
 
-pub use crypto::verify_backup_password;
+pub use crypto::{decrypt_manifest_db, unlock_manifest_key, verify_backup_password};
+pub use database::{find_call_history_record, manifest_file_count, ManifestFileRecord};
 
 pub(crate) const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 

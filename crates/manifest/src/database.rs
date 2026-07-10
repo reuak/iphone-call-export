@@ -15,7 +15,14 @@ pub struct ManifestFileRecord {
 pub struct FileEncryptionMetadata {
     pub protection_class: u32,
     pub wrapped_key: Vec<u8>,
+    /// Final restored file size.
     pub logical_size: Option<u64>,
+    /// Size before backup content processing, when supplied by MobileBackup.
+    pub size_before_copy: Option<u64>,
+    /// Apple MobileBackup content-compression method identifier.
+    pub content_compression_method: Option<u64>,
+    /// Apple MobileBackup content-encoding method identifier.
+    pub content_encoding_method: Option<u64>,
 }
 
 pub fn find_call_history_record(database_path: &Path) -> Result<Option<ManifestFileRecord>> {
@@ -86,11 +93,17 @@ pub fn parse_file_encryption_metadata(blob: &[u8]) -> Result<FileEncryptionMetad
         );
     }
 
-    let logical_size = metadata_dict.get("Size").and_then(value_u64);
     Ok(FileEncryptionMetadata {
         protection_class,
         wrapped_key: key_data[4..].to_vec(),
-        logical_size,
+        logical_size: metadata_dict.get("Size").and_then(value_u64),
+        size_before_copy: metadata_dict.get("SizeBeforeCopy").and_then(value_u64),
+        content_compression_method: metadata_dict
+            .get("ContentCompressionMethod")
+            .and_then(value_u64),
+        content_encoding_method: metadata_dict
+            .get("ContentEncodingMethod")
+            .and_then(value_u64),
     })
 }
 

@@ -12,6 +12,14 @@ pub struct ManifestFileRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestPathRecord {
+    pub file_id: String,
+    pub domain: String,
+    pub relative_path: String,
+    pub flags: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEncryptionMetadata {
     pub protection_class: u32,
     pub wrapped_key: Vec<u8>,
@@ -49,6 +57,37 @@ pub fn find_call_history_record(database_path: &Path) -> Result<Option<ManifestF
         })
         .optional()
         .context("CallHistory.storedata konnte in Manifest.db nicht gesucht werden")
+}
+
+/// Finds likely contact databases and vCard files in an already decrypted Manifest.db.
+/// The search is deliberately broad because paths differ between iOS releases.
+pub fn find_contact_candidates(database_path: &Path) -> Result<Vec<ManifestPathRecord>> {
+    let connection = Connection::open(database_path)
+        .with_context(|| format!("Entschlüsselte Manifest.db kann nicht geöffnet werden: {}", database_path.display()))?;
+
+    let mut statement = connection.prepare(
+        "SELECT fileID, domain, relativePath, flags\n\
+         FROM Files\n\
+         WHERE lower(relativePath) LIKE '%addressbook%'\n\
+            OR lower(relativePath) LIKE '%contacts%'\n\
+            OR lower(relativePath) LIKE '%.vcf'\n\
+            OR lower(relativePath) LIKE '%/abperson%'\n\
+            OR lower(relativePath) LIKE '%/abstore%'\n\
+         ORDER BY domain, relativePath",
+    )?;
+
+    let records = statement
+        .query_map([], |row| {
+            Ok(ManifestPathRecord {
+                file_id: row.get(0)?,
+                domain: row.get(1)?,
+                relative_path: row.get(2)?,
+                flags: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(records)
 }
 
 pub fn parse_file_encryption_metadata(blob: &[u8]) -> Result<FileEncryptionMetadata> {

@@ -4,7 +4,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
     decrypt_manifest_db, find_call_history_record, inspect_manifest_db, keybag_tag_u32,
-    manifest_file_count, read_encrypted_backup_metadata, unlock_manifest_key,
+    manifest_file_count, parse_file_encryption_metadata, read_encrypted_backup_metadata,
+    unlock_manifest_key,
 };
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
@@ -23,10 +24,19 @@ struct Args {
     unlock: bool,
 }
 
+fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
+    let progress = ProgressBar::new_spinner();
+    progress.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    progress.set_message(message.into());
+    progress.enable_steady_tick(Duration::from_millis(90));
+    Ok(progress)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    // Der Pfad wird aus dem Home-Verzeichnis des aktuell angemeldeten Benutzers
-    // ermittelt. Es ist kein Benutzername wie "admin" fest im Code hinterlegt.
     let root = args.backup_root.unwrap_or(default_backup_root()?);
 
     println!("Suche Backups in: {}", root.display());
@@ -86,14 +96,7 @@ fn main() -> Result<()> {
                 bail!("Kein Passwort eingegeben");
             }
 
-            let progress = ProgressBar::new_spinner();
-            progress.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            progress.set_message("Backup-Schlüssel wird abgeleitet (10.000.000 + 10.000 Runden) …");
-            progress.enable_steady_tick(Duration::from_millis(90));
-
+            let progress = spinner("Backup-Schlüssel wird abgeleitet (10.000.000 + 10.000 Runden) …")?;
             let manifest_key = unlock_manifest_key(&encrypted, password.as_bytes());
             progress.finish_and_clear();
             let Some(manifest_key) = manifest_key? else {
@@ -104,13 +107,7 @@ fn main() -> Result<()> {
             println!("✓ Manifest-Schlüssel entsperrt");
 
             let temp = NamedTempFile::new()?;
-            let decrypt_progress = ProgressBar::new_spinner();
-            decrypt_progress.set_style(
-                ProgressStyle::with_template("{spinner:.cyan} {msg} [{elapsed_precise}]")?
-                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-            );
-            decrypt_progress.set_message("Manifest.db wird vollständig entschlüsselt …");
-            decrypt_progress.enable_steady_tick(Duration::from_millis(90));
+            let decrypt_progress = spinner("Manifest.db wird vollständig entschlüsselt …")?;
             let decrypted_size = decrypt_manifest_db(
                 &backup.join("Manifest.db"),
                 temp.path(),
@@ -130,6 +127,17 @@ fn main() -> Result<()> {
                     println!("  Relativer Pfad: {}", record.relative_path);
                     println!("  Backup-Datei-ID: {}", record.file_id);
                     println!("  Physischer Pfad: {}", backup.join(&record.file_id[..2]).join(&record.file_id).display());
+                    println!("  Metadaten-BLOB: {} Bytes", record.metadata_blob.len());
+
+                    let file_crypto = parse_file_encryption_metadata(&record.metadata_blob)?;
+                    println!("✓ Dateiverschlüsselungsmetadaten gelesen");
+                    println!("  Schutzklasse: {}", file_crypto.protection_class);
+                    println!("  Eingewickelter Dateischlüssel: {} Bytes", file_crypto.wrapped_key.len());
+                    match file_crypto.logical_size {
+                        Some(size) => println!("  Logische Dateigröße: {size} Bytes"),
+                        None => println!("  Logische Dateigröße: unbekannt"),
+                    }
+                    println!("\nNächster Schritt: Dateischlüssel entsperren und CallHistory.storedata entschlüsseln.");
                 }
                 None => {
                     println!("⚠ CallHistory.storedata wurde in Manifest.db nicht gefunden");

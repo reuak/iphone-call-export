@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+indicatif.workspace = true
 rpassword.workspace = true
 zeroize.workspace = true
 iphone-call-export-backup = { path = "../backup" }

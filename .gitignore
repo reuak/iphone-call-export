@@ -1,0 +1,6 @@
+/target
+.DS_Store
+*.xlsx
+*.csv
+contacts.vcf
+.env

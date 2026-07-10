@@ -1,0 +1,15 @@
+[package]
+name = "iphone-call-export-manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+aes.workspace = true
+pbkdf2.workspace = true
+plist.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+zeroize.workspace = true

@@ -35,6 +35,13 @@ fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
     Ok(progress)
 }
 
+fn show_optional_number(label: &str, value: Option<u64>) {
+    match value {
+        Some(value) => println!("  {label}: {value}"),
+        None => println!("  {label}: nicht gesetzt"),
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let root = args.backup_root.unwrap_or(default_backup_root()?);
@@ -128,38 +135,65 @@ fn main() -> Result<()> {
                     println!("  Backup-Datei-ID: {}", record.file_id);
                     let physical_path = backup.join(&record.file_id[..2]).join(&record.file_id);
                     println!("  Physischer Pfad: {}", physical_path.display());
+                    println!("  Physische Dateigröße: {} Bytes", physical_path.metadata()?.len());
                     println!("  Metadaten-BLOB: {} Bytes", record.metadata_blob.len());
 
                     let file_crypto = parse_file_encryption_metadata(&record.metadata_blob)?;
-                    println!("✓ Dateiverschlüsselungsmetadaten gelesen");
+                    println!("✓ Datei- und Kompressionsmetadaten gelesen");
                     println!("  Schutzklasse: {}", file_crypto.protection_class);
                     println!(
                         "  Eingewickelter Dateischlüssel: {} Bytes",
                         file_crypto.wrapped_key.len()
                     );
-                    let logical_size = file_crypto
-                        .logical_size
-                        .context("Logische Dateigröße fehlt; sichere Entschlüsselung ist nicht möglich")?;
-                    println!("  Logische Dateigröße: {logical_size} Bytes");
+                    match file_crypto.logical_size {
+                        Some(size) => println!("  Logische Dateigröße: {size} Bytes"),
+                        None => println!("  Logische Dateigröße: nicht gesetzt"),
+                    }
+                    match file_crypto.size_before_copy {
+                        Some(size) => println!("  SizeBeforeCopy: {size} Bytes"),
+                        None => println!("  SizeBeforeCopy: nicht gesetzt"),
+                    }
+                    show_optional_number(
+                        "ContentCompressionMethod",
+                        file_crypto.content_compression_method,
+                    );
+                    show_optional_number(
+                        "ContentEncodingMethod",
+                        file_crypto.content_encoding_method,
+                    );
 
                     let file_key = unlocked.unlock_file_key(&file_crypto)?;
                     println!("✓ Dateischlüssel entsperrt");
 
-                    let call_history_temp = NamedTempFile::new()?;
-                    let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;
-                    let call_history_size = decrypt_backup_file(
-                        &physical_path,
-                        call_history_temp.path(),
-                        &file_key,
-                        logical_size,
-                    );
-                    file_progress.finish_and_clear();
-                    let call_history_size = call_history_size?;
+                    let physical_size = physical_path.metadata()?.len();
+                    let logical_size = file_crypto
+                        .logical_size
+                        .context("Logische Dateigröße fehlt; sichere Entschlüsselung ist nicht möglich")?;
 
-                    println!(
-                        "✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)"
-                    );
-                    println!("✓ Entschlüsselte Anrufdatenbank besitzt einen gültigen SQLite-Kopf");
+                    if logical_size > physical_size
+                        || file_crypto.content_compression_method.unwrap_or(0) != 0
+                        || file_crypto.content_encoding_method.unwrap_or(0) != 0
+                    {
+                        println!("\n✓ Komprimierte oder codierte Backup-Datei erkannt");
+                        println!("Nächster Schritt: gespeicherten Inhalt entschlüsseln und anschließend gemäß den oben angezeigten Methoden dekodieren.");
+                    } else {
+                        let call_history_temp = NamedTempFile::new()?;
+                        let file_progress = spinner("CallHistory.storedata wird entschlüsselt …")?;
+                        let call_history_size = decrypt_backup_file(
+                            &physical_path,
+                            call_history_temp.path(),
+                            &file_key,
+                            logical_size,
+                        );
+                        file_progress.finish_and_clear();
+                        let call_history_size = call_history_size?;
+
+                        println!(
+                            "✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)"
+                        );
+                        println!("✓ Entschlüsselte Anrufdatenbank besitzt einen gültigen SQLite-Kopf");
+                    }
+
                     println!(
                         "\nDie entschlüsselten Datenbanken wurden nur temporär angelegt und werden jetzt gelöscht."
                     );

@@ -29,7 +29,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>iPhone Call Export</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -45,13 +45,37 @@ CLI="$HERE/../Resources/iphone-call-export"
 osascript - "$CLI" <<'APPLESCRIPT'
 on run argv
   set cliPath to item 1 of argv
-  set backupChoice to choose folder with prompt "Ordner mit den iPhone-Backups auswählen" default location (path to library folder from user domain)
-  set backupPath to POSIX path of backupChoice
-  set outputChoice to choose file name with prompt "CSV-Datei speichern" default name "iphone-anrufe-mit-kontakten.csv"
-  set outputPath to POSIX path of outputChoice
-  set contactChoice to button returned of (display dialog "Kontakte aus dem iPhone-AddressBook abgleichen?" buttons {"Ohne Kontakte", "Mit Kontakten"} default button "Mit Kontakten" with title "iPhone Call Export")
+  set homePath to POSIX path of (path to home folder)
+  set defaultBackupRoot to homePath & "Library/Application Support/MobileSync/Backup"
 
-  set cmd to quoted form of cliPath & " --unlock --backup-root " & quoted form of backupPath & " --csv " & quoted form of outputPath
+  set backupMode to button returned of (display dialog ¬
+    "Die App sucht Finder-iPhone-Backups automatisch am üblichen macOS-Speicherort. Nur bei Backups auf einem anderen Datenträger muss ein Ordner gewählt werden." ¬
+    buttons {"Anderen Ordner wählen", "Automatisch suchen"} ¬
+    default button "Automatisch suchen" ¬
+    with title "iPhone Call Export")
+
+  set backupArgument to ""
+  if backupMode is "Anderen Ordner wählen" then
+    set backupChoice to choose folder with prompt "MobileSync/Backup-Ordner oder konkreten Geräte-Backup-Ordner auswählen" default location (path to home folder)
+    set backupPath to POSIX path of backupChoice
+    set backupArgument to " --backup-root " & quoted form of backupPath
+  else
+    set backupArgument to " --backup-root " & quoted form of defaultBackupRoot
+  end if
+
+  set outputChoice to choose file name ¬
+    with prompt "CSV-Datei speichern" ¬
+    default location (path to home folder) ¬
+    default name "iphone-anrufe-mit-kontakten.csv"
+  set outputPath to POSIX path of outputChoice
+
+  set contactChoice to button returned of (display dialog ¬
+    "Kontakte aus dem iPhone-AddressBook abgleichen?" ¬
+    buttons {"Ohne Kontakte", "Mit Kontakten"} ¬
+    default button "Mit Kontakten" ¬
+    with title "iPhone Call Export")
+
+  set cmd to quoted form of cliPath & " --unlock" & backupArgument & " --csv " & quoted form of outputPath
   if contactChoice is "Mit Kontakten" then set cmd to cmd & " --find-contacts"
 
   tell application "Terminal"
@@ -70,5 +94,10 @@ echo
 echo "✓ Installiert: $APP_DIR"
 echo "Öffnen mit:"
 echo "  open \"$APP_DIR\""
+echo
+echo "Die App sucht Finder-Backups standardmäßig automatisch unter:"
+echo "  $HOME/Library/Application Support/MobileSync/Backup"
+echo "Der CSV-Dialog startet im Benutzerordner:"
+echo "  $HOME"
 echo
 echo "Hinweis: Terminal benötigt vollständigen Festplattenzugriff für MobileSync-Backups."

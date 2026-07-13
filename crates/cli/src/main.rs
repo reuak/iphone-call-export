@@ -11,6 +11,7 @@ use iphone_call_export_manifest::{
     UnlockedBackup,
 };
 use std::{
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -32,6 +33,10 @@ struct Args {
 
     #[arg(long)]
     find_contacts: bool,
+
+    /// Backup-Passwort aus stdin lesen; vorgesehen für die native macOS-App
+    #[arg(long)]
+    password_stdin: bool,
 }
 
 fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
@@ -91,7 +96,7 @@ fn inspect_and_export_calls(
                     println!("✓ {} Anrufzeilen mit AddressBook-Kontakten abgeglichen", stats.matched_contacts);
                 }
                 println!("  Ausgabe: {}", output_path.display());
-                println!("  Felder: Datum, Dauer, Richtung, angenommen, Rufnummer, aufgelöster Name, Name aus Anrufliste, Organisation, Kontaktquelle, Anruftyp, Land, Dienstanbieter, ID");
+                println!("  Felder: Datum, Zeit, Zeitzone, Dauer in Sekunden und Minuten, Richtung, angenommen, Rufnummer, aufgelöster Name, Name aus Anrufliste, Organisation, Kontaktquelle, Anruftyp, Land, Dienstanbieter, ID");
             } else {
                 println!("\nCSV-Export aktivieren mit:");
                 println!("  cargo run --release -p iphone-call-export -- --unlock --find-contacts --csv iphone-anrufe.csv");
@@ -182,6 +187,17 @@ fn decrypt_primary_addressbook(
     Ok(Some(decrypted))
 }
 
+fn read_password(args: &Args) -> Result<Zeroizing<String>> {
+    if args.password_stdin {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        Ok(Zeroizing::new(input.trim_end_matches(['\r', '\n']).to_owned()))
+    } else {
+        println!("\nDas Passwort wird lokal und unsichtbar eingegeben.");
+        Ok(Zeroizing::new(rpassword::prompt_password("Backup-Passwort: ")?))
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let root = args.backup_root.clone().unwrap_or(default_backup_root()?);
@@ -231,8 +247,7 @@ fn main() -> Result<()> {
         }
 
         if args.unlock {
-            println!("\nDas Passwort wird lokal und unsichtbar eingegeben.");
-            let password = Zeroizing::new(rpassword::prompt_password("Backup-Passwort: ")?);
+            let password = read_password(&args)?;
             if password.is_empty() {
                 bail!("Kein Passwort eingegeben");
             }

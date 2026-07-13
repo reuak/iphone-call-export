@@ -9,8 +9,13 @@ use anyhow::{bail, Context, Result};
 use plist::Value;
 use std::{fs::File, io::Read, path::Path};
 
-pub use call_history::{export_calls_csv, inspect_call_history_schema, CallHistorySchema};
-pub use contacts::{inspect_addressbook_schema, AddressBookSchema};
+pub use call_history::{
+    export_calls_csv, export_calls_csv_with_contacts, inspect_call_history_schema,
+    CallExportStats, CallHistorySchema,
+};
+pub use contacts::{
+    inspect_addressbook_schema, load_contact_index, AddressBookSchema, ContactIndex, ContactMatch,
+};
 pub use crypto::{decrypt_manifest_db, unlock_manifest_key, verify_backup_password};
 pub use database::{
     find_call_history_record, find_contact_candidates, find_primary_addressbook_record,
@@ -178,7 +183,6 @@ mod tests {
     fn detects_plain_sqlite_header() {
         let dir = temp_dir("plain");
         fs::write(dir.join("Manifest.db"), b"SQLite format 3\0payload").expect("write");
-
         let status = inspect_manifest_db(&dir).expect("inspect");
         assert!(status.is_plain_sqlite);
         assert_eq!(status.size_bytes, 23);
@@ -189,7 +193,6 @@ mod tests {
     fn detects_non_sqlite_header() {
         let dir = temp_dir("encrypted");
         fs::write(dir.join("Manifest.db"), [0x91_u8; 32]).expect("write");
-
         let status = inspect_manifest_db(&dir).expect("inspect");
         assert!(!status.is_plain_sqlite);
         assert_eq!(status.size_bytes, 32);

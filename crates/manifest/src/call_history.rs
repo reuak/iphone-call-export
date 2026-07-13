@@ -1,6 +1,6 @@
 use crate::ContactIndex;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Local, Offset, Utc};
 use rusqlite::Connection;
 use std::path::Path;
 
@@ -62,9 +62,9 @@ pub fn export_calls_csv_with_contacts(
     let mut writer = csv::WriterBuilder::new().delimiter(b';').from_path(output_path)
         .with_context(|| format!("CSV-Datei kann nicht erstellt werden: {}", output_path.display()))?;
     writer.write_record([
-        "Datum", "Dauer_Sekunden", "Richtung", "Angenommen", "Rufnummer", "Name",
-        "Name_Anrufliste", "Kontakt_Organisation", "Kontaktquelle", "Anruftyp", "Land",
-        "Dienstanbieter", "Eindeutige_ID",
+        "Datum", "Zeit", "Zeitzone", "Dauer_Sekunden", "Dauer_Minuten", "Richtung",
+        "Angenommen", "Rufnummer", "Name", "Name_Anrufliste", "Kontakt_Organisation",
+        "Kontaktquelle", "Anruftyp", "Land", "Dienstanbieter", "Eindeutige_ID",
     ])?;
     let rows = statement.query_map([], |row| {
         Ok((
@@ -79,7 +79,10 @@ pub fn export_calls_csv_with_contacts(
     let mut matched_contacts = 0_u64;
     for row in rows {
         let (date, duration, originated, answered, address, call_name, call_type, country, provider, unique_id) = row?;
-        let date_text = date.and_then(format_apple_timestamp).unwrap_or_default();
+        let (date_text, time_text, timezone_text) = date
+            .and_then(format_apple_timestamp)
+            .unwrap_or_default();
+        let duration_seconds = duration.map(|value| value.max(0.0));
         let direction = match originated { Some(1) => "ausgehend", Some(_) => "eingehend", None => "unbekannt" };
         let answered_text = match answered { Some(1) => "ja", Some(_) => "nein", None => "unbekannt" };
         let address = address.unwrap_or_default();
@@ -91,7 +94,10 @@ pub fn export_calls_csv_with_contacts(
         let source = if contact.is_some() { "iPhone-AddressBook" } else if call_name.is_empty() { "" } else { "Anrufliste" };
         writer.write_record([
             date_text,
-            duration.map(|value| value.round().to_string()).unwrap_or_default(),
+            time_text,
+            timezone_text,
+            duration_seconds.map(|value| value.round().to_string()).unwrap_or_default(),
+            duration_seconds.map(|value| format!("{:.2}", value / 60.0)).unwrap_or_default(),
             direction.to_owned(), answered_text.to_owned(), address,
             resolved_name.to_owned(), call_name, organization.to_owned(), source.to_owned(),
             call_type.map(|value| value.to_string()).unwrap_or_default(),
@@ -103,21 +109,33 @@ pub fn export_calls_csv_with_contacts(
     Ok(CallExportStats { exported, matched_contacts })
 }
 
-fn format_apple_timestamp(value: f64) -> Option<String> {
+fn format_apple_timestamp(value: f64) -> Option<(String, String, String)> {
     if !value.is_finite() { return None; }
     let unix_seconds = value + APPLE_EPOCH_UNIX_SECONDS;
     let seconds = unix_seconds.floor() as i64;
     let nanos = ((unix_seconds - seconds as f64) * 1_000_000_000.0).round().clamp(0.0, 999_999_999.0) as u32;
     let utc: DateTime<Utc> = DateTime::from_timestamp(seconds, nanos)?;
-    Some(utc.with_timezone(&Local).to_rfc3339())
+    let local = utc.with_timezone(&Local);
+    let offset = local.offset().fix().local_minus_utc();
+    let sign = if offset < 0 { '-' } else { '+' };
+    let absolute = offset.unsigned_abs();
+    let timezone = format!("UTC{sign}{:02}:{:02}", absolute / 3600, (absolute % 3600) / 60);
+    Some((
+        local.format("%d.%m.%Y").to_string(),
+        local.format("%H:%M:%S").to_string(),
+        timezone,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn converts_apple_epoch() {
-        let text = format_apple_timestamp(0.0).expect("timestamp");
-        assert!(text.starts_with("2001-01-01T"));
+    fn converts_apple_epoch_into_separate_fields() {
+        let (date, time, timezone) = format_apple_timestamp(0.0).expect("timestamp");
+        assert_eq!(date.len(), 10);
+        assert_eq!(time.len(), 8);
+        assert!(timezone.starts_with("UTC"));
     }
 }

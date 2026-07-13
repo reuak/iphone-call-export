@@ -2,7 +2,11 @@ use anyhow::{Context, Result};
 use directories::UserDirs;
 use iphone_call_export_common::BackupInfo;
 use plist::Value;
-use std::{fs, path::{Path, PathBuf}, time::SystemTime};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 pub fn default_backup_root() -> Result<PathBuf> {
     let home = UserDirs::new()
@@ -13,7 +17,14 @@ pub fn default_backup_root() -> Result<PathBuf> {
     Ok(home.join("Library/Application Support/MobileSync/Backup"))
 }
 
+/// Resolves the newest iPhone backup below a MobileSync Backup directory.
+/// For convenience, a concrete backup directory containing Manifest.plist is
+/// accepted as well. This makes GUI folder selection tolerant of either level.
 pub fn newest_backup(root: &Path) -> Result<PathBuf> {
+    if root.join("Manifest.plist").is_file() {
+        return Ok(root.to_path_buf());
+    }
+
     let entries = fs::read_dir(root).with_context(|| {
         format!(
             "Backup-Ordner kann nicht gelesen werden: {}. Auf macOS benötigt Terminal bzw. die App möglicherweise vollständigen Festplattenzugriff.",
@@ -39,7 +50,12 @@ pub fn newest_backup(root: &Path) -> Result<PathBuf> {
         .into_iter()
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, path)| path)
-        .context("Kein iPhone-Backup mit Manifest.plist gefunden")
+        .with_context(|| {
+            format!(
+                "Kein iPhone-Backup mit Manifest.plist in {} gefunden. Erwartet wird entweder der MobileSync/Backup-Ordner oder ein konkreter Geräte-Backup-Ordner.",
+                root.display()
+            )
+        })
 }
 
 pub fn inspect_backup(path: &Path) -> Result<BackupInfo> {
@@ -73,10 +89,29 @@ fn bool_value(dict: &plist::Dictionary, key: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("iphone-call-export-{name}-{nonce}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
+    }
 
     #[test]
     fn default_path_ends_with_mobile_sync_backup() {
         let path = default_backup_root().expect("home directory");
         assert!(path.ends_with("Library/Application Support/MobileSync/Backup"));
+    }
+
+    #[test]
+    fn accepts_specific_backup_directory() {
+        let backup = temp_dir("direct-backup");
+        fs::write(backup.join("Manifest.plist"), b"test").expect("write manifest");
+        assert_eq!(newest_backup(&backup).expect("resolve"), backup);
+        let _ = fs::remove_dir_all(backup);
     }
 }

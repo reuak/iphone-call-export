@@ -55,6 +55,31 @@ pub fn find_call_history_record(database_path: &Path) -> Result<Option<ManifestF
         .context("CallHistory.storedata konnte in Manifest.db nicht gesucht werden")
 }
 
+pub fn find_primary_addressbook_record(database_path: &Path) -> Result<Option<ManifestFileRecord>> {
+    let connection = Connection::open(database_path)
+        .with_context(|| format!("Entschlüsselte Manifest.db kann nicht geöffnet werden: {}", database_path.display()))?;
+
+    connection
+        .query_row(
+            "SELECT fileID, domain, relativePath, file\n\
+             FROM Files\n\
+             WHERE domain = 'HomeDomain'\n\
+               AND relativePath = 'Library/AddressBook/AddressBook.sqlitedb'\n\
+             LIMIT 1",
+            [],
+            |row| {
+                Ok(ManifestFileRecord {
+                    file_id: row.get(0)?,
+                    domain: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    metadata_blob: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .context("Primäre AddressBook.sqlitedb konnte in Manifest.db nicht gesucht werden")
+}
+
 /// Finds actual contact databases and vCard files, excluding preferences and UI assets.
 pub fn find_contact_candidates(database_path: &Path) -> Result<Vec<ManifestPathRecord>> {
     let connection = Connection::open(database_path)

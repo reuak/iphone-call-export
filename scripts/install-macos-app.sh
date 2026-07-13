@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="iPhone Call Export"
-APP_VERSION="0.3.1"
+APP_VERSION="0.3.2"
 INSTALL_DIR="${HOME}/Applications"
 APP_DIR="${INSTALL_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
@@ -57,9 +57,9 @@ fi
 WRAPPER
 chmod 700 "$RESOURCES_DIR/iphone-call-export"
 
-# Für unverschlüsselte Backups darf die Oberfläche kein Passwort verlangen.
-# Die Quelländerung wird nur für den lokalen Build angewendet, damit ältere
-# gespeicherte App-Daten und die übrige Oberfläche unverändert bleiben.
+# Lokale Build-Anpassungen für unverschlüsselte Backups und die PDF-API der
+# aktuell installierten macOS-SDK-Version. Die eigentliche Quelldatei bleibt
+# dabei unverändert; kompiliert wird eine temporäre Kopie.
 PATCHED_SWIFT="$(mktemp -t iphone-call-export-swift).swift"
 trap 'rm -f "$PATCHED_SWIFT"' EXIT
 python3 - "$ROOT_DIR/macos/IPhoneCallExportApp.swift" "$PATCHED_SWIFT" <<'PY'
@@ -78,6 +78,25 @@ source = source.replace(
     'SecureField("Backup-Passwort", text: $model.password)',
     'SecureField(model.selectedBackup?.encrypted == false ? "Kein Passwort erforderlich" : "Backup-Passwort", text: $model.password)\n                        .disabled(model.selectedBackup?.encrypted == false)'
 )
+old_pdf = '''        let operation = NSPrintOperation.pdfOperation(with: textView, inside: textView.bounds, to: url, printInfo: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+        guard operation.run() else { throw NSError(domain: "PDF", code: 1, userInfo: [NSLocalizedDescriptionKey: "PDF konnte nicht erzeugt werden"]) }
+'''
+new_pdf = '''        let pdfData = NSMutableData()
+        let operation = NSPrintOperation.pdfOperation(with: textView, inside: textView.bounds, to: pdfData, printInfo: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+        guard operation.run() else {
+            throw NSError(domain: "PDF", code: 1, userInfo: [NSLocalizedDescriptionKey: "PDF konnte nicht erzeugt werden"])
+        }
+        guard pdfData.write(to: url, atomically: true) else {
+            throw NSError(domain: "PDF", code: 2, userInfo: [NSLocalizedDescriptionKey: "PDF-Datei konnte nicht gespeichert werden"])
+        }
+'''
+if old_pdf not in source:
+    raise SystemExit("PDF-Code konnte im Swift-Quelltext nicht gefunden werden")
+source = source.replace(old_pdf, new_pdf)
 Path(sys.argv[2]).write_text(source)
 PY
 
@@ -102,7 +121,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleName</key><string>${APP_NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
-  <key>CFBundleVersion</key><string>31</string>
+  <key>CFBundleVersion</key><string>32</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

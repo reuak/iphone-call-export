@@ -11,6 +11,9 @@ RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 
 cd "$ROOT_DIR"
 echo "Baue optimierte CLI …"
+# Alte Binärdatei entfernen, damit niemals versehentlich eine frühere App-Version
+# erneut in das Bundle kopiert wird.
+rm -f target/release/iphone-call-export
 cargo build --release -p iphone-call-export
 
 rm -rf "$APP_DIR"
@@ -29,7 +32,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>iPhone Call Export</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.1</string>
+  <key>CFBundleShortVersionString</key><string>0.1.2</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -52,12 +55,18 @@ on run argv
     "Die App sucht Finder-iPhone-Backups automatisch am üblichen macOS-Speicherort. Nur bei Backups auf einem anderen Datenträger muss ein Ordner gewählt werden." ¬
     buttons {"Anderen Ordner wählen", "Automatisch suchen"} ¬
     default button "Automatisch suchen" ¬
-    with title "iPhone Call Export")
+    with title "iPhone Call Export 0.1.2")
 
   set backupArgument to ""
   if backupMode is "Anderen Ordner wählen" then
     set backupChoice to choose folder with prompt "MobileSync/Backup-Ordner oder konkreten Geräte-Backup-Ordner auswählen" default location (path to home folder)
-    set backupPath to POSIX path of backupChoice
+    set selectedPath to POSIX path of backupChoice
+
+    -- Auch mit einer älteren CLI funktioniert die Auswahl eines konkreten
+    -- Geräteordners: enthält er Manifest.plist, wird sein übergeordneter
+    -- MobileSync/Backup-Ordner übergeben.
+    set normalizeCommand to "p=" & quoted form of selectedPath & "; if [ -f \"$p/Manifest.plist\" ]; then dirname \"$p\"; else printf '%s' \"$p\"; fi"
+    set backupPath to do shell script normalizeCommand
     set backupArgument to " --backup-root " & quoted form of backupPath
   else
     set backupArgument to " --backup-root " & quoted form of defaultBackupRoot
@@ -73,7 +82,7 @@ on run argv
     "Kontakte aus dem iPhone-AddressBook abgleichen?" ¬
     buttons {"Ohne Kontakte", "Mit Kontakten"} ¬
     default button "Mit Kontakten" ¬
-    with title "iPhone Call Export")
+    with title "iPhone Call Export 0.1.2")
 
   set cmd to quoted form of cliPath & " --unlock" & backupArgument & " --csv " & quoted form of outputPath
   if contactChoice is "Mit Kontakten" then set cmd to cmd & " --find-contacts"
@@ -92,6 +101,7 @@ touch "$APP_DIR"
 
 echo
 echo "✓ Installiert: $APP_DIR"
+echo "✓ App-Version: 0.1.2"
 echo "Öffnen mit:"
 echo "  open \"$APP_DIR\""
 echo

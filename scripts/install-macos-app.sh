@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="iPhone Call Export"
-APP_VERSION="0.2.0"
+APP_VERSION="0.3.0"
 INSTALL_DIR="${HOME}/Applications"
 APP_DIR="${INSTALL_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
@@ -42,7 +42,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleName</key><string>${APP_NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
-  <key>CFBundleVersion</key><string>20</string>
+  <key>CFBundleVersion</key><string>30</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -59,9 +59,10 @@ echo "✓ App-Version: $APP_VERSION"
 echo "Öffnen mit:"
 echo "  open \"$APP_DIR\""
 echo
-echo "Die App arbeitet vollständig ohne Terminal."
-echo "Der CSV-Speicherort ist standardmäßig:"
-echo "  $HOME/iphone-anrufe-mit-kontakten.csv"
+echo "Die App speichert die eingelesene Telefonliste dauerhaft unter:"
+echo "  $HOME/Library/Application Support/iPhone Call Export/telefonate.json"
+echo
+echo "Backup-Passwort und entschlüsselte Datenbanken werden nicht dauerhaft gespeichert."
 echo
 echo "Hinweis: Für den automatischen Zugriff auf MobileSync-Backups kann die App"
 echo "unter Systemeinstellungen → Datenschutz & Sicherheit → Vollständiger Festplattenzugriff"

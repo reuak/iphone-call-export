@@ -31,3 +31,13 @@ sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 zeroize = "1"
+
+# Die Passwortableitung (10 Mio. PBKDF2-Runden) und AES-Dateientschlüsselung
+# sind in einem ungeoptimierten Debug-Build unnötig langsam. Leichte Optimierung
+# des eigenen Codes plus volle Optimierung der Abhängigkeiten hält brauchbare
+# Debug-Informationen, beschleunigt aber den normalen `cargo run` deutlich.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

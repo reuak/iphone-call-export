@@ -3,12 +3,17 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use iphone_call_export_backup::{default_backup_root, inspect_backup, newest_backup};
 use iphone_call_export_manifest::{
-    decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db, export_calls_csv,
-    find_call_history_record, inspect_call_history_schema, inspect_manifest_db, keybag_tag_u32,
-    manifest_file_count, parse_file_encryption_metadata, read_encrypted_backup_metadata,
-    unlock_backup,
+    decrypt_backup_file, decrypt_backup_payload, decrypt_manifest_db,
+    export_calls_csv_with_contacts, find_call_history_record, find_contact_candidates,
+    find_primary_addressbook_record, inspect_addressbook_schema, inspect_call_history_schema,
+    inspect_manifest_db, keybag_tag_u32, load_contact_index, manifest_file_count,
+    parse_file_encryption_metadata, read_encrypted_backup_metadata, unlock_backup, ContactIndex,
+    UnlockedBackup,
 };
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
@@ -16,17 +21,17 @@ use zeroize::Zeroizing;
 #[command(name = "iphone-call-export")]
 #[command(about = "Liest iPhone-Finder-Backups für die spätere Zeiterfassung aus")]
 struct Args {
-    /// Optionaler Pfad zum MobileSync/Backup-Ordner
     #[arg(long)]
     backup_root: Option<PathBuf>,
 
-    /// Backup-Passwort lokal abfragen, Manifest.db und Anrufdaten entschlüsseln
     #[arg(long)]
     unlock: bool,
 
-    /// Entschlüsselte Anrufe als semikolongetrennte CSV-Datei exportieren
     #[arg(long, value_name = "DATEI")]
     csv: Option<PathBuf>,
+
+    #[arg(long)]
+    find_contacts: bool,
 }
 
 fn spinner(message: impl Into<String>) -> Result<ProgressBar> {
@@ -62,7 +67,11 @@ fn hex_header(header: &[u8; 16]) -> String {
         .join(" ")
 }
 
-fn inspect_and_export_calls(database_path: &Path, csv_path: Option<&Path>) -> Result<()> {
+fn inspect_and_export_calls(
+    database_path: &Path,
+    csv_path: Option<&Path>,
+    contacts: Option<&ContactIndex>,
+) -> Result<()> {
     let schema = inspect_call_history_schema(database_path)?;
     println!("✓ Entschlüsselte Anrufdatenbank als SQLite geöffnet");
     println!("  Tabellen: {}", schema.tables.join(", "));
@@ -76,20 +85,101 @@ fn inspect_and_export_calls(database_path: &Path, csv_path: Option<&Path>) -> Re
             println!("  Spalten: {}", schema.call_columns.join(", "));
 
             if let Some(output_path) = csv_path {
-                let exported = export_calls_csv(database_path, output_path)?;
-                println!("✓ {exported} Anrufe als CSV exportiert");
+                let stats = export_calls_csv_with_contacts(database_path, output_path, contacts)?;
+                println!("✓ {} Anrufe als CSV exportiert", stats.exported);
+                if contacts.is_some() {
+                    println!("✓ {} Anrufzeilen mit AddressBook-Kontakten abgeglichen", stats.matched_contacts);
+                }
                 println!("  Ausgabe: {}", output_path.display());
-                println!("  Felder: Datum, Dauer, Richtung, angenommen, Rufnummer, Name, Anruftyp, Land, Dienstanbieter, ID");
+                println!("  Felder: Datum, Dauer, Richtung, angenommen, Rufnummer, aufgelöster Name, Name aus Anrufliste, Organisation, Kontaktquelle, Anruftyp, Land, Dienstanbieter, ID");
             } else {
                 println!("\nCSV-Export aktivieren mit:");
-                println!("  cargo run -p iphone-call-export -- --unlock --csv iphone-anrufe.csv");
+                println!("  cargo run --release -p iphone-call-export -- --unlock --find-contacts --csv iphone-anrufe.csv");
             }
         }
-        None => {
-            println!("⚠ Keine eindeutige Anruftabelle erkannt");
-        }
+        None => println!("⚠ Keine eindeutige Anruftabelle erkannt"),
     }
     Ok(())
+}
+
+fn show_contact_candidates(manifest_path: &Path, backup_path: &Path) -> Result<()> {
+    let candidates = find_contact_candidates(manifest_path)?;
+    println!("\n✓ Kontaktsuche in Manifest.db abgeschlossen");
+    if candidates.is_empty() {
+        println!("  Keine AddressBook-, Contacts- oder VCF-Kandidaten gefunden");
+        return Ok(());
+    }
+
+    println!("  {} Kandidaten gefunden:", candidates.len());
+    for record in candidates {
+        let physical_path = if record.file_id.len() >= 2 {
+            backup_path.join(&record.file_id[..2]).join(&record.file_id)
+        } else {
+            backup_path.join(&record.file_id)
+        };
+        println!("  - [{}] {}", record.domain, record.relative_path);
+        println!("    Datei-ID: {}", record.file_id);
+        println!("    Flags: {}", record.flags);
+        println!("    Physischer Pfad: {}", physical_path.display());
+    }
+    Ok(())
+}
+
+fn decrypt_primary_addressbook(
+    manifest_path: &Path,
+    backup_path: &Path,
+    unlocked: &UnlockedBackup,
+) -> Result<Option<NamedTempFile>> {
+    let Some(record) = find_primary_addressbook_record(manifest_path)? else {
+        println!("⚠ Primäre HomeDomain-AddressBook.sqlitedb wurde nicht gefunden");
+        return Ok(None);
+    };
+
+    println!("\n✓ Primäre AddressBook.sqlitedb ausgewählt");
+    println!("  Relativer Pfad: {}", record.relative_path);
+    println!("  Datei-ID: {}", record.file_id);
+
+    let physical_path = backup_path.join(&record.file_id[..2]).join(&record.file_id);
+    println!("  Physischer Pfad: {}", physical_path.display());
+    println!("  Verschlüsselte Größe: {} Bytes", physical_path.metadata()?.len());
+
+    let metadata = parse_file_encryption_metadata(&record.metadata_blob)?;
+    let file_key = unlocked.unlock_file_key(&metadata)?;
+    println!("✓ AddressBook-Dateischlüssel entsperrt");
+
+    let decrypted = NamedTempFile::new()?;
+    let progress = spinner("AddressBook.sqlitedb wird entschlüsselt …")?;
+    let payload = decrypt_backup_payload(&physical_path, decrypted.path(), &file_key);
+    progress.finish_and_clear();
+    let payload = payload?;
+
+    println!("✓ AddressBook-Inhalt entschlüsselt ({} Bytes)", payload.size_bytes);
+    println!("  Direktes SQLite: {}", if payload.is_sqlite { "ja" } else { "nein" });
+    if !payload.is_sqlite {
+        println!("  Kopf als Text: {}", printable_header(&payload.header));
+        println!("  Kopf als Hex: {}", hex_header(&payload.header));
+        return Ok(None);
+    }
+
+    let schema = inspect_addressbook_schema(decrypted.path())?;
+    println!("✓ AddressBook-Datenbank als SQLite geöffnet");
+    println!("  Tabellen: {}", schema.tables.join(", "));
+    match schema.person_table {
+        Some(table) => {
+            println!("  Kontakt-/Personentabelle: {table}");
+            println!("  Spalten: {}", schema.person_columns.join(", "));
+        }
+        None => println!("  Kontakt-/Personentabelle: nicht automatisch erkannt"),
+    }
+    match schema.multivalue_table {
+        Some(table) => {
+            println!("  Telefonnummerntabelle: {table}");
+            println!("  Spalten: {}", schema.multivalue_columns.join(", "));
+        }
+        None => println!("  Telefonnummerntabelle: nicht automatisch erkannt"),
+    }
+
+    Ok(Some(decrypted))
 }
 
 fn main() -> Result<()> {
@@ -171,6 +261,20 @@ fn main() -> Result<()> {
             let count = manifest_file_count(manifest_temp.path())?;
             println!("✓ SQLite geöffnet: {count} Dateieinträge");
 
+            let addressbook_temp = if args.find_contacts {
+                show_contact_candidates(manifest_temp.path(), &backup)?;
+                decrypt_primary_addressbook(manifest_temp.path(), &backup, &unlocked)?
+            } else {
+                None
+            };
+            let contacts = addressbook_temp
+                .as_ref()
+                .map(|file| load_contact_index(file.path()))
+                .transpose()?;
+            if let Some(index) = &contacts {
+                println!("✓ {} Telefonnummern aus AddressBook für den Abgleich geladen", index.phone_count);
+            }
+
             match find_call_history_record(manifest_temp.path())? {
                 Some(record) => {
                     println!("✓ CallHistory.storedata gefunden");
@@ -220,7 +324,7 @@ fn main() -> Result<()> {
                         println!("  Kopf als Hex: {}", hex_header(&payload.header));
                         println!("  Direktes SQLite: {}", if payload.is_sqlite { "ja" } else { "nein" });
                         if payload.is_sqlite {
-                            inspect_and_export_calls(payload_temp.path(), args.csv.as_deref())?;
+                            inspect_and_export_calls(payload_temp.path(), args.csv.as_deref(), contacts.as_ref())?;
                         } else {
                             println!("Unbekanntes Inhaltsformat; Export wurde nicht ausgeführt.");
                         }
@@ -237,7 +341,7 @@ fn main() -> Result<()> {
                         let call_history_size = call_history_size?;
 
                         println!("✓ CallHistory.storedata vollständig entschlüsselt ({call_history_size} Bytes)");
-                        inspect_and_export_calls(call_history_temp.path(), args.csv.as_deref())?;
+                        inspect_and_export_calls(call_history_temp.path(), args.csv.as_deref(), contacts.as_ref())?;
                     }
 
                     println!("\nDie entschlüsselten Datenbanken wurden nur temporär angelegt und werden jetzt gelöscht.");
@@ -246,7 +350,7 @@ fn main() -> Result<()> {
             }
         } else {
             println!("\nNächster Test:");
-            println!("  cargo run -p iphone-call-export -- --unlock --csv iphone-anrufe.csv");
+            println!("  cargo run --release -p iphone-call-export -- --unlock --find-contacts --csv iphone-anrufe.csv");
             println!("Das Passwort wird weder gespeichert noch ausgegeben.");
         }
     }

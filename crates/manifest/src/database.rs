@@ -12,16 +12,20 @@ pub struct ManifestFileRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestPathRecord {
+    pub file_id: String,
+    pub domain: String,
+    pub relative_path: String,
+    pub flags: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEncryptionMetadata {
     pub protection_class: u32,
     pub wrapped_key: Vec<u8>,
-    /// Final restored file size.
     pub logical_size: Option<u64>,
-    /// Size before backup content processing, when supplied by MobileBackup.
     pub size_before_copy: Option<u64>,
-    /// Apple MobileBackup content-compression method identifier.
     pub content_compression_method: Option<u64>,
-    /// Apple MobileBackup content-encoding method identifier.
     pub content_encoding_method: Option<u64>,
 }
 
@@ -49,6 +53,73 @@ pub fn find_call_history_record(database_path: &Path) -> Result<Option<ManifestF
         })
         .optional()
         .context("CallHistory.storedata konnte in Manifest.db nicht gesucht werden")
+}
+
+pub fn find_primary_addressbook_record(database_path: &Path) -> Result<Option<ManifestFileRecord>> {
+    let connection = Connection::open(database_path)
+        .with_context(|| format!("Entschlüsselte Manifest.db kann nicht geöffnet werden: {}", database_path.display()))?;
+
+    connection
+        .query_row(
+            "SELECT fileID, domain, relativePath, file\n\
+             FROM Files\n\
+             WHERE domain = 'HomeDomain'\n\
+               AND relativePath = 'Library/AddressBook/AddressBook.sqlitedb'\n\
+             LIMIT 1",
+            [],
+            |row| {
+                Ok(ManifestFileRecord {
+                    file_id: row.get(0)?,
+                    domain: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    metadata_blob: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .context("Primäre AddressBook.sqlitedb konnte in Manifest.db nicht gesucht werden")
+}
+
+/// Finds actual contact databases and vCard files, excluding preferences and UI assets.
+pub fn find_contact_candidates(database_path: &Path) -> Result<Vec<ManifestPathRecord>> {
+    let connection = Connection::open(database_path)
+        .with_context(|| format!("Entschlüsselte Manifest.db kann nicht geöffnet werden: {}", database_path.display()))?;
+
+    let mut statement = connection.prepare(
+        "SELECT fileID, domain, relativePath, flags\n\
+         FROM Files\n\
+         WHERE lower(relativePath) LIKE '%.vcf'\n\
+            OR lower(relativePath) LIKE '%addressbook%.sqlitedb'\n\
+            OR lower(relativePath) LIKE '%addressbook%.sqlite'\n\
+            OR lower(relativePath) LIKE '%addressbook%.db'\n\
+            OR lower(relativePath) LIKE '%contacts%.sqlitedb'\n\
+            OR lower(relativePath) LIKE '%contacts%.sqlite'\n\
+            OR lower(relativePath) LIKE '%contacts%.db'\n\
+            OR lower(relativePath) LIKE '%/abperson%'\n\
+            OR lower(relativePath) LIKE '%/abstore%'\n\
+         ORDER BY\n\
+            CASE\n\
+              WHEN lower(relativePath) LIKE '%addressbook.sqlitedb' THEN 0\n\
+              WHEN lower(relativePath) LIKE '%addressbook%.sqlite%' THEN 1\n\
+              WHEN lower(relativePath) LIKE '%contacts%.sqlite%' THEN 2\n\
+              WHEN lower(relativePath) LIKE '%.vcf' THEN 3\n\
+              ELSE 4\n\
+            END,\n\
+            CASE WHEN domain = 'HomeDomain' THEN 0 ELSE 1 END,\n\
+            domain, relativePath",
+    )?;
+
+    statement
+        .query_map([], |row| {
+            Ok(ManifestPathRecord {
+                file_id: row.get(0)?,
+                domain: row.get(1)?,
+                relative_path: row.get(2)?,
+                flags: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Kontaktkandidaten konnten nicht aus Manifest.db gelesen werden")
 }
 
 pub fn parse_file_encryption_metadata(blob: &[u8]) -> Result<FileEncryptionMetadata> {
